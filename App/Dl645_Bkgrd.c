@@ -30,8 +30,8 @@ void SystemDelayUs(u8 i)
 /**
  * @brief 低电压检测(LVD)检查函数。
  * @param None
- * @return u8 PowerFlag - 电源状态标志，值越大表示电压越高。
- * @note 通过多次采样MADC->LVD_STAT寄存器的LVD状态位来判断电源稳定性。
+ * @return u8 PowerFlag - 电源状态标志，值越小表示电压越高。
+ * @note 通过多次采样MADC->LVD_STAT寄存器的CMP2IIF状态位来判断电源稳定性。
  */
 u8 fnDl645Bkgrd_LVDCheck(void)
 {
@@ -42,15 +42,15 @@ u8 fnDl645Bkgrd_LVDCheck(void)
 		temp = 50; // 每次大循环内部计数器
 		for(j = 0; j < 50; j++) // 进行50次小循环采样
 		{
-			// 检查MADC LVD_STAT寄存器的bit 2 (0x04)，该位指示LVD状态
-			if(!(MADC->LVD_STAT & 0x04)) temp++; // 如果LVD未触发（电压正常），计数增加
-			else temp--; // 如果LVD触发（电压低），计数减少
+			// 检查MADC LVD_STAT寄存器的bit 2 (0x04)，该位指示CMP2IIF状态
+			if(!(MADC->LVD_STAT & 0x04)) temp++; // 如果CMP2IIF==0 低于阈值，计数增加
+			else temp--; // 如果CMP2IIF==1 高于阈值，计数减少
 			SystemDelayUs(10); // 短暂延时
 			fnWDT_Restart(); // 重启看门狗
 		}
 		// 根据内部计数器的结果调整电源状态标志
-		if(temp > 90) PowerFlag++; // 如果大部分时间电压正常，增加标志
-		if(temp < 10) PowerFlag--; // 如果大部分时间电压低，减少标志
+		if(temp > 90) PowerFlag++; // 如果大部分时间电压低，增加标志
+		if(temp < 10) PowerFlag--; // 如果大部分时间电压正常，减少标志
 	}
 	return PowerFlag; // 返回最终的电源状态标志
 }

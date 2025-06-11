@@ -36,5 +36,7 @@ memory-bank/
 uVision/
 keil-assistant.log
 uv4.log.lock
+*.o
+*.exe
 
 

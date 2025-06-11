@@ -4,6 +4,7 @@
         "*.clean": "makefile",
         "*.make": "makefile",
         "Dl645_Disp.C": "cpp",
-        "Dl645_Front.C": "cpp"
+        "Dl645_Front.C": "cpp",
+        "cstdint": "c"
     }
 }
