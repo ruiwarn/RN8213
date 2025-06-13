@@ -636,16 +636,46 @@ eDL645B_ErrInfo_TypeDef fnDl645_PutParaVar(sFrmDl645B_TypeDef *RxFrm)
 			
 			// 校准电压增益
 			temppw[0] = EMU->URMS; // 读取当前电压RMS值
-			ADErr = ((float)temppw[0] - (float)tempus) / tempus; // 计算电压误差
-			ADErr = (-ADErr / (1 + ADErr)); // 计算增益调整系数
-			if(ADErr > 0) Dl645FirmPara.UGain = (u16)(ADErr * 32768); // 计算正增益值
-			else Dl645FirmPara.UGain = (u16)(65535 + ADErr * 32768); // 计算负增益值（补码）
+			
+			/*
+			 * 电压增益校正公式原理：
+			 * 1. 相对误差 = (测量值 - 标准值) / 标准值
+			 * 2. 增益校正系数 = -相对误差 / (1 + 相对误差)
+			 * 
+			 * 原理说明：
+			 * - 当测量值 > 标准值时，相对误差为正，需要降低增益（负校正）
+			 * - 当测量值 < 标准值时，相对误差为负，需要提高增益（正校正）
+			 * - 公式中的负号实现了这种反向校正逻辑
+			 * - 分母(1 + 相对误差)是为了避免过度校正，确保系统稳定性
+			 * 
+			 * 例如：如果测量值比标准值大10% (相对误差=0.1)
+			 * 校正系数 = -0.1/(1+0.1) = -0.091 = -9.1%，即降低增益9.1%
+			 */
+			ADErr = ((float)temppw[0] - (float)tempus) / tempus; // 计算电压相对误差
+			ADErr = (-ADErr / (1 + ADErr)); // 计算增益校正系数
+			
+			/*
+			 * 增益寄存器值计算原理：
+			 * EMU芯片的增益寄存器采用16位有符号数表示：
+			 * - 正增益：直接乘以32768 (2^15) 转换为定点数
+			 * - 负增益：使用补码表示，即65535 + 负值*32768
+			 * - 32768是因为增益寄存器的满量程对应±1的增益调整范围
+			 */
+			if(ADErr > 0) Dl645FirmPara.UGain = (u16)(ADErr * 32768); // 正增益：直接乘以满量程
+			else Dl645FirmPara.UGain = (u16)(65535 + ADErr * 32768); // 负增益：补码表示
 			EMU->UGAIN = Dl645FirmPara.UGain; // 写入EMU->UGAIN寄存器
 	
 			// 校准电流增益
 			temppw[0] = EMU->IARMS; // 读取当前A相电流RMS值
-			ADErr = ((float)temppw[0] - (float)tempis) / tempis; // 计算电流误差
-			ADErr = ((-ADErr) / (1 + ADErr)); // 计算增益调整系数
+			
+			/*
+			 * 电流增益校正公式（与电压校正相同原理）：
+			 * 目的：通过调整电流通道的增益来补偿测量误差
+			 * 应用场景：当电流互感器或ADC存在系统性误差时使用
+			 */
+			ADErr = ((float)temppw[0] - (float)tempis) / tempis; // 计算电流相对误差
+			ADErr = ((-ADErr) / (1 + ADErr)); // 计算增益校正系数（双重括号可能是为了强调符号）
+			
 			if(ADErr > 0) Dl645FirmPara.IAGain = (u16)(ADErr * 32768); // 计算正增益值
 			else Dl645FirmPara.IAGain = (u16)(65535 + ADErr * 32768); // 计算负增益值（补码）
 			EMU->IAGAIN = Dl645FirmPara.IAGain; // 写入EMU->IAGAIN寄存器
@@ -658,16 +688,72 @@ eDL645B_ErrInfo_TypeDef fnDl645_PutParaVar(sFrmDl645B_TypeDef *RxFrm)
 			ConstE.Dat2 = (u8)((tempconst & 0xF000) >> 12);
 			fnDl645File_Write(Dl645FileId_HighPara , Dl645FileItemInfoOffAddr_HighPara_PConstE , (u8 *)&ConstE , 3); // 保存到文件系统
 			
-			// 计算并保存电流、电压系数
-			Dl645FirmPara.KIArms = (float)tempis / ((float)tempib);
-			Dl645FirmPara.KUrms = (float)tempus * 100 / (tempub);
+			/*
+			 * 电压电流系数计算原理：
+			 * KIArms = 标准电流值 / 基准电流值
+			 * KUrms = 标准电压值 * 100 / 基准电压值
+			 * 
+			 * 【核心概念区别详解】：
+			 * 
+			 * 1. **基准电压/电流 (tempub/tempib)**：
+			 *    - 定义：EMU芯片ADC满量程对应的理论物理量
+			 *    - 来源：芯片设计规格，如ADC满量程对应220V、5A
+			 *    - 特点：固定不变的设计参数，用于芯片内部计算
+			 *    - 例如：基准电压可能是220V（芯片设计的额定电压）
+			 *           基准电流可能是5A（芯片设计的额定电流）
+			 * 
+			 * 2. **标准电压/电流 (tempus/tempis)**：
+			 *    - 定义：校准时外部标准源提供的精确已知值
+			 *    - 来源：高精度标准电源、标准电流源
+			 *    - 特点：校准时的实际输入值，用于建立准确的转换关系
+			 *    - 例如：标准电压可能是219.8V（实际输入的精确值）
+			 *           标准电流可能是4.995A（实际输入的精确值）
+			 * 
+			 * 3. **为什么需要两个概念**：
+			 *    - 芯片设计值（基准）与实际校准值（标准）往往不完全一致
+			 *    - 通过比较两者建立精确的转换系数
+			 *    - 实现从芯片内部数字量到真实物理量的准确转换
+			 * 
+			 * 4. **计算公式的含义**：
+			 *    - 系数 = 实际值 / 设计值
+			 *    - 当ADC读数乘以系数后，得到真实的物理量
+			 *    - 电压系数乘100是为了避免小数运算，提高精度
+			 * 
+			 * 【实际应用举例】：
+			 * 假设EMU芯片设计：ADC读数1000对应220V（基准电压）
+			 * 校准时输入：标准电压源提供219.8V，ADC读数为998
+			 * 那么：KUrms = 219.8 * 100 / 220 = 99.9
+			 * 实际使用时：真实电压 = (ADC读数 * KUrms) / 100
+			 * 
+			 * 目的：建立数字量与物理量之间的精确转换关系
+			 * - 基准值：芯片内部ADC的满量程对应的物理量
+			 * - 标准值：外部标准源提供的已知物理量
+			 * - 系数用于将ADC读数转换为实际的电压/电流值
+			 * - 电压系数乘以100是为了提高精度（避免小数运算）
+			 */
+			Dl645FirmPara.KIArms = (float)tempis / ((float)tempib);    // 电流转换系数
+			Dl645FirmPara.KUrms = (float)tempus * 100 / (tempub);     // 电压转换系数（*100提高精度）
 			
-			// 计算并写入启动功率阈值
-			ADErr = ((float)tempus * (float)tempis) / 32768; // 计算基准功率相关值
-			Dl645FirmPara.PStart = (u16)((ADErr * 0.003) / 256); // 计算启动阈值
+			/*
+			 * 启动功率阈值计算原理：
+			 * 基准功率 = (标准电压 * 标准电流) / 32768
+			 * 启动阈值 = (基准功率 * 0.003) / 256
+			 * 
+			 * 原理说明：
+			 * - 32768是EMU芯片功率计算的归一化因子
+			 * - 0.003表示启动阈值为满量程功率的0.3%（国家标准要求）
+			 * - 256是阈值寄存器的量化因子
+			 * - 目的：设置电表开始计量的最小功率门限，避免小功率时的计量误差
+			 */
+			ADErr = ((float)tempus * (float)tempis) / 32768; // 计算基准功率
+			Dl645FirmPara.PStart = (u16)((ADErr * 0.003) / 256); // 启动阈值=基准功率的0.3%再除以量化因子
 			EMU->PStart = Dl645FirmPara.PStart; // 写入EMU->PStart寄存器
 			
-			// 计算并保存功率系数
+			/*
+			 * 功率系数计算原理：
+			 * KPrms用于将芯片内部功率寄存器值转换为实际功率值
+			 * 分母中的0.0000001是为了调整量纲，使得最终结果的单位正确
+			 */
 			Dl645FirmPara.KPrms = (ADErr / ((float)tempub * (float)tempib * 0.0000001));
 		}
 		else // 误差方式校准功率
@@ -684,24 +770,48 @@ eDL645B_ErrInfo_TypeDef fnDl645_PutParaVar(sFrmDl645B_TypeDef *RxFrm)
 			EMU->HFConst = Dl645FirmPara.HFConst; // 写入EMU->HFConst寄存器
 			fnDl645File_Write(Dl645FileId_FirmPara, Dl645FileItemInfoOffAddr_FirmPara_HFConst, (u8 *)&Dl645FirmPara.HFConst, 2); // 保存到文件系统
 			
-			// 校准功率相位（使用误差）
-			if(tempis > 0x7FFFFFFF) ADErr = -(float)(0xFFFFFFFF - tempis) / 100000; // 处理负误差
-        	else ADErr = (float)tempis / 100000; // 正误差
-			ADErr = ((-ADErr) / (1 + ADErr)); // 计算调整系数
+			/*
+			 * 功率误差校正原理（GPQA寄存器）：
+			 * 当无法获得精确的标准功率值时，可以通过已知的功率误差进行校正
+			 * 
+			 * 误差处理：
+			 * - 如果tempis > 0x7FFFFFFF，说明是负误差（32位有符号数的负数）
+			 * - 负误差 = -(0xFFFFFFFF - tempis) / 100000，转换为实际误差百分比
+			 * - 正误差 = tempis / 100000
+			 * 
+			 * 校正系数计算与增益校正相同，目的是补偿功率测量的系统性误差
+			 */
+			if(tempis > 0x7FFFFFFF) ADErr = -(float)(0xFFFFFFFF - tempis) / 100000; // 处理负误差（补码转换）
+        	else ADErr = (float)tempis / 100000; // 正误差，除以100000转换为小数形式
+			ADErr = ((-ADErr) / (1 + ADErr)); // 计算功率校正系数
 			if(ADErr >= 0) Dl645FirmPara.GPQA = (u16)(ADErr * 32768); // 计算正调整值
 			else Dl645FirmPara.GPQA = (u16)(65535 + ADErr * 32768); // 计算负调整值（补码）
 			EMU->GPQA = Dl645FirmPara.GPQA; // 写入EMU->GPQA寄存器
 			fnDl645File_Write(Dl645FileId_FirmPara, Dl645FileItemInfoOffAddr_FirmPara_GPQA, (u8 *)&Dl645FirmPara.GPQA, 2); // 保存到文件系统
 			
-			// 计算并保存电流、电压系数
+			// 计算并保存电流、电压系数（读取当前测量值作为基准）
 			tempis = EMU->IARMS; // 读取当前电流
 			Dl645FirmPara.KIArms = (float)tempis / ((float)tempib);
 			tempus = EMU->URMS; // 读取当前电压
 			Dl645FirmPara.KUrms = (float)tempus * 100 / (tempub);
 			
-			// 计算并写入启动功率阈值和功率系数
+			/*
+			 * 复杂功率系数计算公式原理：
+			 * ADErr = (HFConst × 4 × 电表常数 × 10 × 基准电压 × 基准电流 × 21.47483648) / (3.6 × 10^12 × 1.8432)
+			 * 
+			 * 各参数含义：
+			 * - HFConst：高频常数，EMU芯片的时钟相关参数
+			 * - 4：可能与EMU内部计算周期相关的系数
+			 * - 电表常数：imp/kWh，每千瓦时对应的脉冲数
+			 * - 10：单位转换系数
+			 * - 21.47483648：EMU芯片特定的计算常数（可能与内部时钟频率相关）
+			 * - 3.6 × 10^12：时间和能量单位转换常数（3600秒/小时 × 10^9纳秒/秒）
+			 * - 1.8432：可能与晶振频率相关的归一化系数
+			 * 
+			 * 目的：建立EMU内部功率寄存器值与实际功率的精确对应关系
+			 */
 			ADErr = ((float)temphfconst * 4 * (float)tempconst * 10 * (float)tempub * (float)tempib * 21.47483648) / (3.6 * 1000000000000 * 1.8432); // 复杂公式计算基准功率相关值
-			Dl645FirmPara.PStart = (u16)((ADErr * 0.003) / 256); // 计算启动阈值
+			Dl645FirmPara.PStart = (u16)((ADErr * 0.003) / 256); // 计算启动阈值（0.3%门限）
 			EMU->PStart = Dl645FirmPara.PStart; // 写入EMU->PStart寄存器
 			Dl645FirmPara.KPrms = (ADErr / ((float)tempub * (float)tempib * 0.0000001)); // 计算功率系数
 			
@@ -731,13 +841,34 @@ eDL645B_ErrInfo_TypeDef fnDl645_PutParaVar(sFrmDl645B_TypeDef *RxFrm)
 		if(tempub != 0 ) // 标准功率方式校准相位
 		{
 			temppw[0] = EMU->PowerPA; // 读取当前A相功率
-			ADErr = ((float)temppw[0] - (float)tempus) / tempus; // 计算功率误差
-			ADErr = (asin(-ADErr / 1.732)) * 100 * 57.29578; // 计算相位调整角度（弧度转角度，涉及功率因数？）
-			if(ADErr > 0) Dl645FirmPara.PhsA = (u16)(ADErr); // 计算正调整值
-			else Dl645FirmPara.PhsA = (u16)(512 + ADErr); // 计算负调整值（补码？）
+			
+			/*
+			 * 相位校正公式原理：
+			 * 1. 功率误差 = (测量功率 - 标准功率) / 标准功率
+			 * 2. 相位角度 = arcsin(-功率误差 / √3) × 转换系数
+			 * 
+			 * 理论基础：
+			 * - 在电阻负载下，功率P = U × I × cos(φ)，其中φ是相位差
+			 * - 当存在相位误差时，测量功率会偏小，功率误差 ≈ sin(相位误差)
+			 * - 对于小角度，sin(φ) ≈ φ，所以相位误差 ≈ arcsin(功率误差)
+			 * - 1.732 = √3，可能与三相系统或特定算法相关
+			 * - 57.29578 = 180/π，用于弧度转角度
+			 * - 100是精度系数，将角度转换为寄存器所需的量化单位
+			 * 
+			 * 负号的作用：实现反向校正，如果功率偏小则需要正向相位调整
+			 */
+			ADErr = ((float)temppw[0] - (float)tempus) / tempus; // 计算功率相对误差
+			ADErr = (asin(-ADErr / 1.732)) * 100 * 57.29578; // 弧度转角度再乘精度系数，计算相位调整角度
+			if(ADErr > 0) Dl645FirmPara.PhsA = (u16)(ADErr); // 正向相位调整
+			else Dl645FirmPara.PhsA = (u16)(512 + ADErr); // 负向相位调整（512可能是相位寄存器的中点偏移）
 		}
 		else // 误差方式校准相位
 		{
+			/*
+			 * 直接相位误差校正：
+			 * 当已知相位误差值时，直接使用该误差计算相位校正量
+			 * 处理方式与功率误差校正类似
+			 */
 			if(tempis > 0x7FFFFFFF) ADErr = -(float)(0xFFFFFFFF - tempis) / 100000; // 处理负误差
         	else ADErr = (float)tempis / 100000; // 正误差
 			ADErr = (asin(-ADErr / 1.732)) * 100 * 57.29578; // 计算相位调整角度
@@ -762,22 +893,40 @@ eDL645B_ErrInfo_TypeDef fnDl645_PutParaVar(sFrmDl645B_TypeDef *RxFrm)
 		memcpy(&tempis , &(RxFrm->UDat.Dat[12]) , 2); // 获取误差或补偿值？
 		if(tempus == 0 ) // 以输入的误差校正小电流
 		{
+			/*
+			 * 直接设置小电流补偿值：
+			 * APOSA寄存器用于补偿小电流时的功率测量偏差
+			 * 当电流很小时，由于CT变比误差、导线压降等因素，
+			 * 功率测量可能存在固定的偏移量，需要通过APOSA进行补偿
+			 */
 			EMU->APOSA = tempis; // 直接写入补偿值到EMU->APOSA寄存器
 			Dl645FirmPara.APOSA = tempis; // 保存补偿值
 		}
 		else // 根据当前功率和标准功率计算补偿值
 		{
+			/*
+			 * 小电流功率补偿计算原理：
+			 * 1. 多次采样求平均，提高测量稳定性
+			 * 2. 功率误差 = (测量功率 - 标准功率) / 标准功率
+			 * 3. 补偿值 = -功率误差 × 标准功率
+			 * 
+			 * 原理说明：
+			 * - 小电流时，功率测量往往存在固定的偏移量
+			 * - 通过计算实际偏移量，设置相反的补偿值来抵消误差
+			 * - 负号表示补偿方向与误差方向相反
+			 * - 补偿值的量纲与功率测量值一致
+			 */
 			temppw[0] = EMU->PowerPA; // 读取当前功率
 			for(i = 0; i < 3; i++) // 多次读取求平均，提高稳定性
 			{
 				SystemDelay(250);
 				temppw[1] = EMU->PowerPA;
-				temppw[0] = (temppw[0] + temppw[1]) / 2;
+				temppw[0] = (temppw[0] + temppw[1]) / 2; // 滑动平均滤波
 			}
-			ADErr = ((float)temppw[0] - (float)tempus) / tempus; // 计算功率误差
-			ADErr = -ADErr * tempus; // 计算补偿值
-			if(ADErr > 0) Dl645FirmPara.APOSA = (u16)(ADErr); // 计算正补偿值
-			else Dl645FirmPara.APOSA = (u16)(65535 + ADErr); // 计算负补偿值（补码）
+			ADErr = ((float)temppw[0] - (float)tempus) / tempus; // 计算功率相对误差
+			ADErr = -ADErr * tempus; // 计算绝对补偿值（负号实现反向补偿）
+			if(ADErr > 0) Dl645FirmPara.APOSA = (u16)(ADErr); // 正补偿值
+			else Dl645FirmPara.APOSA = (u16)(65535 + ADErr); // 负补偿值（补码表示）
 			EMU->APOSA = Dl645FirmPara.APOSA; // 写入EMU->APOSA寄存器
 		}
 		
@@ -793,8 +942,16 @@ eDL645B_ErrInfo_TypeDef fnDl645_PutParaVar(sFrmDl645B_TypeDef *RxFrm)
 	case 0x00F81300: // B通道电流校正
 		if(RxFrm->Len != (12 + 12)) return DL645B_ERRINFO_MISC; // 检查帧长度
 		memcpy(&tempib , &(RxFrm->UDat.Dat[8]) , 4); // 获取基准电流
+		
+		/*
+		 * B通道电流系数校准原理：
+		 * KIBrms = 当前测量值 / 基准电流值
+		 * 
+		 * 目的：为B通道（零线电流或辅助电流通道）建立转换系数
+		 * 与A通道类似，用于将ADC数字量转换为实际电流值
+		 */
 		tempis = EMU->IBRMS; // 读取当前B相电流RMS值
-		Dl645FirmPara.KIBrms = (float)tempis / ((float)tempib); // 计算B通道电流系数
+		Dl645FirmPara.KIBrms = (float)tempis / ((float)tempib); // 计算B通道电流转换系数
 		fnDl645File_Write(Dl645FileId_FirmPara, Dl645FileItemInfoOffAddr_FirmPara_KIBrms, (u8 *)&Dl645FirmPara.KIBrms, 4); // 保存系数
 		break;
 	case 0x00F81400: // 对寄存器直接读写操作（调试用？）
@@ -809,16 +966,27 @@ eDL645B_ErrInfo_TypeDef fnDl645_PutParaVar(sFrmDl645B_TypeDef *RxFrm)
 		if(RxFrm->Len != (12 + 3)) return DL645B_ERRINFO_MISC; // 检查帧长度
 		tempus = 0;
 		EMU->SPCMD = 0xE5; // 解除写保护
+		
+		/*
+		 * RMS Offset校正原理：
+		 * 用于补偿电流通道在零电流时的直流偏移
+		 * 
+		 * 原理说明：
+		 * - ADC在零输入时可能有非零输出，这种偏移会影响RMS计算精度
+		 * - 特别是在小电流测量时，直流偏移的影响更为显著
+		 * - IARMSOS/IBRMSOS寄存器存储偏移补偿值
+		 * - EMU芯片在计算RMS时会自动减去这个偏移值
+		 */
 		if(RxFrm->UDat.Dat[8] == 0x00) // 判断是A通道还是B通道 (0x00=A, 其他=B?)
 		{
-			memcpy(&tempus , &(RxFrm->UDat.Dat[9]) , 2); // 获取Offset值
+			memcpy(&tempus , &(RxFrm->UDat.Dat[9]) , 2); // 获取A通道Offset值
 			EMU->IARMSOS = tempus; // 写入A通道RMS Offset寄存器
 			Dl645FirmPara.IARMSOS = tempus; // 保存Offset值
 			fnDl645File_Write(Dl645FileId_FirmPara, Dl645FileItemInfoOffAddr_FirmPara_IARMSOS, (u8 *)&Dl645FirmPara.IARMSOS, 2); // 保存到文件
 		}
 		else
 		{
-			memcpy(&tempus , &(RxFrm->UDat.Dat[9]) , 2); // 获取Offset值
+			memcpy(&tempus , &(RxFrm->UDat.Dat[9]) , 2); // 获取B通道Offset值
 			EMU->IBRMSOS = tempus; // 写入B通道RMS Offset寄存器
 			Dl645FirmPara.IBRMSOS = tempus; // 保存Offset值
 			fnDl645File_Write(Dl645FileId_FirmPara, Dl645FileItemInfoOffAddr_FirmPara_IBRMSOS, (u8 *)&Dl645FirmPara.IBRMSOS, 2); // 保存到文件
